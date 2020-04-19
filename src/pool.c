@@ -87,7 +87,7 @@ developers.
 #define MAX_PATH 1024
 #define RPC_PATH "/json_rpc"
 #define ADDRESS_MAX 128
-#define BLOCK_TIME 120
+#define BLOCK_TIME 60
 #define HR_BLOCK_COUNT 5
 #define TEMLATE_HEIGHT_VARIANCE 5
 #define MAX_BAD_SHARES 5
@@ -285,6 +285,16 @@ void rx_slow_hash_free_state(){}
         }                                                            \
     }
 
+#define JSON_GET_OR_IGNORE(name, parent, type)                       \
+    json_object *name = NULL;                                        \
+    if (!json_object_object_get_ex(parent, #name, &name)) {          \
+        log_debug(#name " not found");                                \
+    } else {                                                         \
+        if (!json_object_is_type(name, type)) {                      \
+            log_debug(#name " not a " #type);                         \
+        }                                                            \
+    }
+
 static inline rpc_callback_t *
 rpc_callback_new(rpc_callback_fun f, void *data)
 {
@@ -354,14 +364,17 @@ database_init(const char* data_dir)
     int rc;
     char *err;
     MDB_txn *txn;
+    char db_dir[MAX_PATH];
+
+    snprintf(db_dir, sizeof (db_dir), "%s/pool", data_dir);
 
     rc = mdb_env_create(&env);
     mdb_env_set_maxdbs(env, (MDB_dbi) DB_COUNT_MAX);
     mdb_env_set_mapsize(env, DB_SIZE);
-    if ((rc = mdb_env_open(env, data_dir, 0, 0664)) != 0)
+    if ((rc = mdb_env_open(env, db_dir, 0, 0664)) != 0)
     {
         err = mdb_strerror(rc);
-        log_fatal("%s (%s)", err, data_dir);
+        log_fatal("%s (%s)", err, db_dir);
         exit(rc);
     }
     if ((rc = mdb_txn_begin(env, NULL, 0, &txn)) != 0)
@@ -1008,8 +1021,8 @@ stratum_get_job_body(char *body, const client_t *client, bool response)
     uint64_t height = job->block_template->height;
     char target_hex[17] = {0};
     target_to_hex(target, &target_hex[0]);
-    char *seed_hash = job->block_template->seed_hash;
-    char *next_seed_hash = job->block_template->next_seed_hash;
+    //char *seed_hash = job->block_template->seed_hash;
+    //char *next_seed_hash = job->block_template->next_seed_hash;
 
     if (response)
     {
@@ -1017,11 +1030,9 @@ stratum_get_job_body(char *body, const client_t *client, bool response)
                 "\"error\":null,\"result\""
                 ":{\"id\":\"%.32s\",\"job\":{"
                 "\"blob\":\"%s\",\"job_id\":\"%.32s\",\"target\":\"%s\","
-                "\"height\":%"PRIu64",\"seed_hash\":\"%.64s\","
-                "\"next_seed_hash\":\"%.64s\"},"
+                "\"height\":%"PRIu64"},"
                 "\"status\":\"OK\"}}\n",
-                json_id, client_id, blob, job_id, target_hex, height,
-                seed_hash, next_seed_hash);
+                json_id, client_id, blob, job_id, target_hex, height);
     }
     else
     {
@@ -1029,10 +1040,8 @@ stratum_get_job_body(char *body, const client_t *client, bool response)
                 "\"job\",\"params\""
                 ":{\"id\":\"%.32s\",\"blob\":\"%s\",\"job_id\":\"%.32s\","
                 "\"target\":\"%s\","
-                "\"height\":%"PRIu64",\"seed_hash\":\"%.64s\","
-                "\"next_seed_hash\":\"%.64s\"}}\n",
-                client_id, blob, job_id, target_hex, height,
-                seed_hash, next_seed_hash);
+                "\"height\":%"PRIu64"}}\n",
+                client_id, blob, job_id, target_hex, height);
     }
 }
 
@@ -1286,10 +1295,10 @@ response_to_block_template(json_object *result,
 
     unsigned int major_version = 0;
     sscanf(block_template->blocktemplate_blob, "%2x", &major_version);
-    uint8_t pow_variant = major_version >= 7 ? major_version - 6 : 0;
+    uint8_t pow_variant = major_version;// >= 7 ? major_version - 6 : 0;
     log_trace("Variant: %u", pow_variant);
 
-    if (pow_variant >= 6)
+    if (pow_variant >= 6 && 0)
     {
         JSON_GET_OR_WARN(seed_hash, result, json_type_string);
         JSON_GET_OR_WARN(next_seed_hash, result, json_type_string);
@@ -1738,7 +1747,7 @@ rpc_on_last_block_header(const char* data, rpc_callback_t *callback)
 
     if (need_new_template)
     {
-        log_info("Fetching new block template");
+        log_info("Fetching new block template - DB Height: %lu", get_db_height());
         char body[RPC_BODY_MAX];
         uint64_t reserve = 17;
         rpc_get_request_body(body, "get_block_template", "sssd",
@@ -2023,7 +2032,7 @@ fetch_view_key(void)
 static void
 fetch_last_block_header(void)
 {
-    log_info("Fetching last block header");
+    log_info("Fetching last block header - DB Height %lu", get_db_height());
     char body[RPC_BODY_MAX];
     rpc_get_request_body(body, "get_last_block_header", NULL);
     rpc_callback_t *cb = rpc_callback_new(rpc_on_last_block_header, NULL);
@@ -2250,10 +2259,10 @@ client_on_block_template(json_object *message, client_t *client)
 
     unsigned int major_version = 0;
     sscanf(btb, "%2x", &major_version);
-    uint8_t pow_variant = major_version >= 7 ? major_version - 6 : 0;
+    uint8_t pow_variant = major_version;// >= 7 ? major_version - 6 : 0;
     log_trace("Variant: %u", pow_variant);
 
-    if (pow_variant >= 6)
+    if (pow_variant >= 6 && 0)
     {
         JSON_GET_OR_WARN(seed_hash, params, json_type_string);
         JSON_GET_OR_WARN(next_seed_hash, params, json_type_string);
@@ -2434,8 +2443,8 @@ client_on_submit(json_object *message, client_t *client)
     unsigned char result_hash[32] = {0};
     unsigned char submitted_hash[32] = {0};
     uint8_t major_version = (uint8_t)block[0];
-    uint8_t pow_variant = major_version >= 7 ? major_version - 6 : 0;
-    if (pow_variant >= 6)
+    uint8_t pow_variant = major_version;// >= 7 ? major_version - 6 : 0;
+    if (pow_variant >= 6 && 0)
     {
         unsigned char seed_hash[32];
         hex_to_bin(bt->seed_hash, 64, seed_hash, 32);
@@ -2596,7 +2605,7 @@ client_on_read(struct bufferevent *bev, void *ctx)
             return;
         }
         JSON_GET_OR_WARN(method, message, json_type_string);
-        JSON_GET_OR_WARN(id, message, json_type_int);
+        JSON_GET_OR_IGNORE(id, message, json_type_int);
         const char *method_name = json_object_get_string(method);
         client->json_id = json_object_get_int(id);
 
@@ -3164,6 +3173,12 @@ int main(int argc, char **argv)
 
     print_config();
     log_info("Starting pool");
+    if (init_db(config.data_dir)) {
+        log_info("Failed to open database: %s", config.data_dir);
+        return 1;
+    }
+
+    log_info("Blockhain DB Height: %lu", get_db_height());
 
     if (config.forked)
     {

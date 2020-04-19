@@ -39,10 +39,14 @@ developers.
 #include <stdio.h>
 #include <errno.h>
 
+#include "blockchain_db/blockchain_db.h"
 #include "cryptonote_basic/cryptonote_basic.h"
 #include "cryptonote_basic/cryptonote_format_utils.h"
 #include "cryptonote_basic/blobdatatype.h"
 #include "cryptonote_basic/difficulty.h"
+#include "cryptonote_core/cryptonote_tx_utils.h"
+#include "cryptonote_core/tx_pool.h"
+#include "cryptonote_core/blockchain.h"
 #include "crypto/crypto.h"
 #include "crypto/hash.h"
 #include "cryptonote_config.h"
@@ -51,6 +55,9 @@ developers.
 #include "common/base58.h"
 #include "common/util.h"
 #include "string_tools.h"
+
+#include <boost/filesystem/path.hpp>
+#include <boost/filesystem/operations.hpp>
 
 #include "xmr.h"
 
@@ -65,12 +72,14 @@ static int nettype_from_prefix(uint8_t *nettype, uint64_t prefix)
         { MAINNET, CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX },
         { MAINNET, CRYPTONOTE_PUBLIC_INTEGRATED_ADDRESS_BASE58_PREFIX },
         { MAINNET, CRYPTONOTE_PUBLIC_SUBADDRESS_BASE58_PREFIX },
+        /*
         { TESTNET, testnet::CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX },
         { TESTNET, testnet::CRYPTONOTE_PUBLIC_INTEGRATED_ADDRESS_BASE58_PREFIX },
         { TESTNET, testnet::CRYPTONOTE_PUBLIC_SUBADDRESS_BASE58_PREFIX },
         { STAGENET, stagenet::CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX },
         { STAGENET, stagenet::CRYPTONOTE_PUBLIC_INTEGRATED_ADDRESS_BASE58_PREFIX },
         { STAGENET, stagenet::CRYPTONOTE_PUBLIC_SUBADDRESS_BASE58_PREFIX }
+        */
     };
     int rv = XMR_MISMATCH_ERROR;
     for (auto ntp : nettype_prefix)
@@ -134,11 +143,59 @@ int get_block_hash(const unsigned char *input, const size_t in_size,
     return rv ? XMR_NO_ERROR : XMR_PARSE_ERROR;
 }
 
+static Blockchain* core_storage = NULL;
+int init_db(const char *dd)
+{
+  //Blockchain* core_storage = NULL;
+  tx_memory_pool m_mempool(*core_storage);
+  core_storage = new Blockchain(m_mempool);
+  if (core_storage == NULL)
+  {
+    throw std::runtime_error("Failed to initialize blockchain");
+  }
+
+  BlockchainDB* db = new_db();
+  if (db == NULL)
+  {
+    throw std::runtime_error("Failed to initialize a database");
+  }
+
+  boost::filesystem::path folder(dd);
+  folder /= db->get_db_name();
+  const std::string filename = folder.string();
+
+  //fprintf(stderr, "Loading blockchain from folder %s\n", filename.c_str());
+  try
+  {
+    db->open(filename, DBF_RDONLY, 2048);
+  }
+  catch (const std::exception& e)
+  {
+    //LOG_PRINT_L0("Error opening database: " << e.what());
+	fprintf(stderr, "exception: %s\n", e.what());
+    return 1;
+  }
+
+  core_storage->init(db, cryptonote::MAINNET);
+
+  return 0;
+}
+
+uint64_t get_db_height()
+{
+	return core_storage->get_current_blockchain_height();
+}
+
 void get_hash(const unsigned char *input, const size_t in_size,
         unsigned char *output, int variant, uint64_t height)
 {
-    cn_slow_hash(input, in_size,
-            reinterpret_cast<hash&>(*output), variant, height);
+    Blockchain *bc = core_storage;
+    crypto::cn_hash_context_t *context = crypto::cn_hash_context_create();
+    blobdata blob(input, input + in_size);
+    crypto::hash h = crypto::null_hash;
+    get_block_longhash(context, bc->get_db(), variant, blob, h, height);
+    memcpy(output, h.data, 32);
+    crypto::cn_hash_context_free(context);
 }
 
 void get_rx_hash(const unsigned char *input, const size_t in_size,

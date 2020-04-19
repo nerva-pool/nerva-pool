@@ -1,4 +1,10 @@
-# monero-pool
+# nerva-pool
+
+**This is the nerva pool PoC, use as such.**
+
+
+
+
 
 A Monero mining pool server written in C.
 

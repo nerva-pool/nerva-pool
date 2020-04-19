@@ -64,6 +64,8 @@ void get_rx_hash(const unsigned char *input, const size_t in_size,
 int validate_block_from_blob(const char *blob_hex,
         const unsigned char *sec_view,
         const unsigned char *pub_spend);
+int init_db(const char *data_dir);
+uint64_t get_db_height(void);
 
 #ifdef __cplusplus
 }
