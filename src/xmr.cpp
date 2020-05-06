@@ -1,4 +1,5 @@
 /*
+Copyright (c) 2020, Nerva Pool Project
 Copyright (c) 2014-2020, The Monero Project
 
 All rights reserved.

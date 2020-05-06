@@ -1,6 +1,7 @@
 # nerva-pool
 
-**This is the nerva pool PoC, use as such.**
+**This is the nerva pool PoC, use as such.** A reference version is currently
+running on [nerva.pooled.work](https://nerva.pooled.work).
 
 
 
