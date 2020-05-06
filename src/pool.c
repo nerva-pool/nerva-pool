@@ -220,6 +220,7 @@ typedef struct payment_t
     uint64_t amount;
     time_t timestamp;
     char address[ADDRESS_MAX];
+    unsigned char error;
 } payment_t;
 
 typedef struct rpc_callback_t rpc_callback_t;
@@ -1825,8 +1826,8 @@ rpc_on_wallet_transferred(const char* data, rpc_callback_t *callback)
 
     int rc;
     char *err;
-    MDB_txn *txn;
-    MDB_cursor *cursor;
+    MDB_txn *txn = NULL;
+    MDB_cursor *cursor = NULL;
 
     /* First, updated balance(s) */
     if ((rc = mdb_txn_begin(env, NULL, 0, &txn)) != 0)
@@ -1843,30 +1844,45 @@ rpc_on_wallet_transferred(const char* data, rpc_callback_t *callback)
         goto cleanup;
     }
     payment_t *payment = (payment_t*) callback->data;
-    for (; payment->amount; payment++)
+    if (payment)
     {
         MDB_cursor_op op = MDB_SET;
         MDB_val key = {ADDRESS_MAX, (void*)payment->address};
         MDB_val val;
+
+        if (error)
+        {
+            log_warn("Error seen on transfer for %s with amount %"PRIu64,
+                    payment->address, payment->amount);
+            payment->error = 1;
+            goto skip_balance;
+        }
+
         rc = mdb_cursor_get(cursor, &key, &val, op);
         if (rc == MDB_NOTFOUND)
         {
             log_error("Payment made to non-existent address");
-            continue;
+            goto skip_balance;
         }
         else if (rc != 0 && rc != MDB_NOTFOUND)
         {
             err = mdb_strerror(rc);
             log_error("%s", err);
-            continue;
+            goto skip_balance;
         }
         uint64_t current_amount = *(uint64_t*)val.mv_data;
-        current_amount -= payment->amount;
-        if (error)
+
+        if (current_amount >= payment->amount)
         {
-            log_warn("Error seen on transfer for %s with amount %"PRIu64,
-                    payment->address, payment->amount);
+            current_amount -= payment->amount;
         }
+        else
+        {
+            log_error("Payment was more than balance: %"PRIu64" > %"PRIu64,
+                      payment->amount, current_amount);
+            current_amount = 0;
+        }
+
         MDB_val new_val = {sizeof(current_amount), (void*)&current_amount};
         rc = mdb_cursor_put(cursor, &key, &new_val, MDB_CURRENT);
         if (rc != 0)
@@ -1875,6 +1891,8 @@ rpc_on_wallet_transferred(const char* data, rpc_callback_t *callback)
             log_error("%s", err);
         }
     }
+
+skip_balance:
     if ((rc = mdb_txn_commit(txn)) != 0)
     {
         err = mdb_strerror(rc);
@@ -1898,8 +1916,8 @@ rpc_on_wallet_transferred(const char* data, rpc_callback_t *callback)
         goto cleanup;
     }
     time_t now = time(NULL);
-    payment = (payment_t*) callback->data;
-    for (; payment->amount; payment++)
+
+    if (payment && !payment->error)
     {
         payment->timestamp = now;
         MDB_val key = {ADDRESS_MAX, (void*)payment->address};
@@ -1908,7 +1926,6 @@ rpc_on_wallet_transferred(const char* data, rpc_callback_t *callback)
         {
             err = mdb_strerror(rc);
             log_error("Error putting payment: %s", err);
-            continue;
         }
     }
     if ((rc = mdb_txn_commit(txn)) != 0)
@@ -1945,13 +1962,6 @@ send_payments(void)
         return rc;
     }
 
-    size_t payments_count = 0;
-    size_t payments_max_count = 25;
-    size_t payments_size = payments_max_count * sizeof(payment_t);
-    payment_t *payments = (payment_t*) calloc(1, payments_size);
-    payment_t *payment = payments;
-    payment_t *end_payment = payment + payments_max_count;
-
     MDB_cursor_op op = MDB_FIRST;
     while (1)
     {
@@ -1970,52 +1980,33 @@ send_payments(void)
 
         log_info("Sending payment of %"PRIu64" to %s\n", amount, address);
 
-        strncpy(payment->address, address, ADDRESS_MAX);
-        payment->amount = amount;
-        payments_count++;
+        // free'd in rpc_callback_free
+        payment_t *payment = (payment_t*) calloc(1, sizeof (payment_t));
 
-        if (++payment == end_payment)
-        {
-            payments_size <<= 1;
-            payments = (payment_t*) realloc(payments, payments_size);
-            payment = payments + payments_max_count;
-            memset(payment, 0, sizeof(payment_t) * payments_max_count);
-            payments_max_count <<= 1;
-            end_payment = payments + payments_max_count;
+        if (!payment) {
+            log_error("send_payments: OOM: alloc payments");
+            return -1;
         }
+
+        strncpy(payment->address, address, ADDRESS_MAX-1);
+        payment->amount = amount;
+
+        char body[160+128];
+        const size_t body_size = sizeof(body);
+        snprintf(body, body_size,
+                "{\"id\":\"0\",\"jsonrpc\":\"2.0\",\"method\":"
+                "\"transfer_split\",\"params\":{"
+                "\"destinations\":["
+                "{\"address\":\"%s\",\"amount\":""%"PRIu64"}"
+                "]}}",
+                payment->address, payment->amount);
+        log_trace(body);
+        rpc_callback_t *cb = rpc_callback_new(
+                rpc_on_wallet_transferred, payment);
+        rpc_wallet_request(base, body, cb);
     }
     mdb_cursor_close(cursor);
     mdb_txn_abort(txn);
-
-    if (payments_count)
-    {
-        size_t body_size = 160 * payments_count + 128;
-        char body[body_size];
-        char *start = body;
-        char *end = body + body_size;
-        start = stecpy(start, "{\"id\":\"0\",\"jsonrpc\":\"2.0\",\"method\":"
-                "\"transfer_split\",\"params\":{"
-                "\"ring_size\":11,\"destinations\":[", end);
-        for (size_t i=0; i<payments_count; i++)
-        {
-            payment_t *p = &payments[i];
-            start = stecpy(start, "{\"address\":\"", end);
-            start = stecpy(start, p->address, end);
-            start = stecpy(start, "\",\"amount\":", end);
-            sprintf(start, "%"PRIu64"}", p->amount);
-            start = body + strlen(body);
-            if (i != payments_count -1)
-                start = stecpy(start, ",", end);
-            else
-                start = stecpy(start, "]}}", end);
-        }
-        log_trace(body);
-        rpc_callback_t *cb = rpc_callback_new(
-                rpc_on_wallet_transferred, payments);
-        rpc_wallet_request(base, body, cb);
-    }
-    else
-        free(payments);
 
     return 0;
 }
@@ -2189,8 +2180,8 @@ client_on_login(json_object *message, client_t *client)
         return;
     }
 
-    strncpy(client->address, address, sizeof(client->address));
-    strncpy(client->worker_id, worker_id, sizeof(client->worker_id));
+    strncpy(client->address, address, sizeof(client->address)-1);
+    strncpy(client->worker_id, worker_id, sizeof(client->worker_id)-1);
     uuid_t cid;
     uuid_generate(cid);
     bin_to_hex((const unsigned char*)cid, sizeof(uuid_t),
